@@ -4,8 +4,7 @@
 module i2c_master_cu(
     input  wire clk,
     input  wire rst,
-    input  wire valid_cmd,
-    
+    input  wire start_i2c,
     input  wire ack_i,
     input  wire rw, /* 0 -> Write; 1 -> Read */
     input  wire [7:0] data_lenght, /* Number of bytes to send */
@@ -20,39 +19,72 @@ module i2c_master_cu(
     output reg  send_ack,
     output reg  read_data,
     output wire [3:0] error,
-    output reg  sda_t
+    output reg  sda_t,
+    output wire scl,
+    output wire p_edge,
+    output wire n_edge
 );
 
-localparam [3:0] PRESCALER  = 4'd2;
+// Tscl = (Tclk * 2 * PRESCALER) + (2 * Tclk)
+localparam [15:0] PRESCALER            = 16'd624; 
 localparam [3:0]
-    STATE_IDLE              = 4'd0,
-    STATE_START             = 4'd1,
-    STATE_DEVICE_ADDR       = 4'd2,
-    STATE_DEVICE_ADDR_ACK   = 4'd3,
-    STATE_REGISTER_ADDR     = 4'd4,
-    STATE_REGISTER_ADDR_ACK = 4'd5,
-    STATE_REPEATED_START    = 4'd6,
-    STATE_READ              = 4'd7, 
-    STATE_READ_ACK          = 4'd8,
-    STATE_WRITE             = 4'd9,
-    STATE_WRITE_ACK         = 4'd10,
-    STATE_STOP              = 4'd11,
-    STATE_ERROR             = 4'd12;
+                  STATE_IDLE           = 4'd0,
+                  STATE_START          = 4'd1,
+                  STATE_ADDR           = 4'd2,
+                  STATE_ADDR_ACK       = 4'd3,
+                  STATE_REPEATED_START = 4'd4,
+                  STATE_READ           = 4'd5, 
+                  STATE_READ_ACK       = 4'd6,
+                  STATE_WRITE          = 4'd7,
+                  STATE_WRITE_ACK      = 4'd8,
+                  STATE_STOP           = 4'd9,
+                  STATE_ERROR          = 4'd10;
     
     
 reg  [3:0] state;
 wire [3:0] next_state;
-
 reg data_received       = 1'b0;
 reg data_sent           = 1'b0;
 reg byte_sent           = 1'b0;
-reg repeated_start_done = 1'b0;
-reg stop_done           = 1'b0;
-reg [4:0] bit_count_reg = 5'd0, bit_count_next;
+reg i2c_en              = 1'b0;
+reg [63:0] scl_counter  = 64'd0;
+reg [3:0] bit_counter   = 4'd0;
+reg rst_bit_counter     = 1'b1;
 reg [7:0] data_len_reg  = 8'd0, data_len_next;
 reg addr_sent_reg       = 1'b0, addr_sent_next;
+reg scl_reg             = 1'b1;
+reg scl_negedge         = 1'b0;
+reg scl_posedge         = 1'b0;
 
-assign error = state; /* Debug purposes */
+
+assign error            = state; /* Debug purposes */
+assign scl              = scl_reg;
+assign p_edge           = scl_posedge;
+assign n_edge           = scl_negedge;
+
+/* Scl generator */
+always@(posedge clk) begin
+    if(!rst) begin
+        scl_reg     <= 1'b1;
+        scl_counter <= 64'd0;
+        scl_negedge <= 1'b0;
+        scl_posedge <= 1'b0;
+    end
+    else begin
+        if(scl_counter < PRESCALER & i2c_en) begin
+            scl_counter      <= scl_counter + 1'b1;
+            scl_negedge      <= 1'b0;
+            scl_posedge      <= 1'b0;
+        end
+        else if(scl_counter == PRESCALER & i2c_en) begin
+            scl_reg          <= ~scl_reg;
+            scl_counter      <= 64'd0;
+            scl_posedge      <= ~scl_reg;
+            scl_negedge      <= scl_reg;
+        end
+    end
+end
+
 
 always@(posedge clk) begin
     if(!rst) begin
@@ -60,42 +92,49 @@ always@(posedge clk) begin
     end
     else begin
         state         <= next_state;
-        bit_count_reg <= bit_count_next;
         data_len_reg  <= data_len_next;
         addr_sent_reg <= addr_sent_next;
     end
 end
 
-assign next_state = (state == STATE_IDLE & valid_cmd)                          ? STATE_START :
-                    (state == STATE_IDLE & ~valid_cmd)                         ? STATE_IDLE : 
-                    (state == STATE_START)                                     ? STATE_DEVICE_ADDR:
-                    (state == STATE_DEVICE_ADDR & byte_sent)                   ? STATE_DEVICE_ADDR_ACK:
-                    (state == STATE_DEVICE_ADDR & ~byte_sent)                  ? STATE_DEVICE_ADDR:
-                    (state == STATE_DEVICE_ADDR_ACK & ack_i)                   ? STATE_ERROR:
-                    (state == STATE_DEVICE_ADDR_ACK & ~ack_i & addr_sent_reg)  ? STATE_READ:
-                    (state == STATE_DEVICE_ADDR_ACK & ~ack_i & ~addr_sent_reg) ? STATE_REGISTER_ADDR:
-                    (state == STATE_REGISTER_ADDR & byte_sent)                 ? STATE_REGISTER_ADDR_ACK :
-                    (state == STATE_REGISTER_ADDR & ~byte_sent)                ? STATE_REGISTER_ADDR :
-                    (state == STATE_REGISTER_ADDR_ACK & ack_i)                 ? STATE_ERROR :
-                    (state == STATE_REGISTER_ADDR_ACK & ~ack_i & rw)           ? STATE_REPEATED_START :
-                    (state == STATE_REGISTER_ADDR_ACK & ~ack_i & ~rw)          ? STATE_WRITE :
-                    (state == STATE_REPEATED_START & ~repeated_start_done)     ? STATE_REPEATED_START:
-                    (state == STATE_REPEATED_START & repeated_start_done)      ? STATE_DEVICE_ADDR:
-                    (state == STATE_READ & data_received)                      ? STATE_READ_ACK:
-                    (state == STATE_READ & ~data_received)                     ? STATE_READ:
-                    (state == STATE_READ_ACK & ack_o)                          ? STATE_ERROR :
-                    (state == STATE_READ_ACK & ~ack_o)                         ? STATE_STOP :
-                    (state == STATE_WRITE & byte_sent)                         ? STATE_WRITE_ACK :
-                    (state == STATE_WRITE & ~byte_sent)                        ? STATE_WRITE :
-                    (state == STATE_WRITE_ACK & ack_i)                         ? STATE_ERROR :
-                    (state == STATE_WRITE_ACK & ~ack_i & ~data_sent)           ? STATE_WRITE :
-                    (state == STATE_WRITE_ACK & ~ack_i & data_sent)            ? STATE_STOP :
-                    (state == STATE_STOP & stop_done)                          ? STATE_IDLE :
-                    (state == STATE_STOP & ~stop_done)                         ? STATE_STOP :
-                    (state == STATE_ERROR)                                     ? STATE_IDLE : STATE_IDLE;
+always@(posedge clk) begin
+    if(~rst || rst_bit_counter) begin
+        bit_counter <= 4'd0;
+    end
+    else if(scl_negedge) begin
+        bit_counter <= bit_counter + 1'b1; 
+    end
+end
+
+assign next_state = (state == STATE_IDLE & start_i2c)                                    ? STATE_START :
+                    (state == STATE_IDLE & ~start_i2c)                                   ? STATE_IDLE : 
+                    (state == STATE_START & scl_negedge)                                 ? STATE_ADDR :
+                    (state == STATE_START & ~scl_negedge)                                ? STATE_START :
+                    (state == STATE_ADDR & byte_sent)                                    ? STATE_ADDR_ACK :
+                    (state == STATE_ADDR & ~byte_sent)                                   ? STATE_ADDR :
+                    (state == STATE_ADDR_ACK & ~scl_negedge)                             ? STATE_ADDR_ACK :
+                    (state == STATE_ADDR_ACK & ack_i & scl_negedge)                      ? STATE_ADDR_ACK :
+                    (state == STATE_ADDR_ACK & ~ack_i & addr_sent_reg & scl_negedge)     ? STATE_READ :
+                    (state == STATE_ADDR_ACK & ~ack_i & ~addr_sent_reg & scl_negedge)    ? STATE_WRITE :
+                    (state == STATE_READ & data_received)                                ? STATE_READ_ACK :
+                    (state == STATE_READ & ~data_received)                               ? STATE_READ :
+                    (state == STATE_READ_ACK & ~scl_negedge)                             ? STATE_READ_ACK :
+                    (state == STATE_READ_ACK & ack_o & scl_negedge)                      ? STATE_ERROR :
+                    (state == STATE_READ_ACK & ~ack_o & scl_negedge)                     ? STATE_STOP :
+                    (state == STATE_WRITE & byte_sent)                                   ? STATE_WRITE_ACK :
+                    (state == STATE_WRITE & ~byte_sent)                                  ? STATE_WRITE :
+                    (state == STATE_WRITE_ACK & ~scl_negedge)                            ? STATE_WRITE_ACK :
+                    (state == STATE_WRITE_ACK & ack_i & scl_negedge)                     ? STATE_ERROR :
+                    (state == STATE_WRITE_ACK & ~ack_i & ~rw & ~data_sent & scl_negedge) ? STATE_WRITE :
+                    (state == STATE_WRITE_ACK & ~ack_i & ~rw & data_sent & scl_negedge)  ? STATE_STOP :
+                    (state == STATE_WRITE_ACK & ~ack_i & rw & scl_negedge)               ? STATE_REPEATED_START : 
+                    (state == STATE_REPEATED_START & scl_posedge)                        ? STATE_START :
+                    (state == STATE_REPEATED_START & ~scl_posedge)                       ? STATE_REPEATED_START :
+                    (state == STATE_STOP & scl_posedge)                                  ? STATE_IDLE :
+                    (state == STATE_STOP & ~scl_posedge)                                 ? STATE_STOP :
+                    (state == STATE_ERROR)                                               ? STATE_IDLE : STATE_IDLE;
                     
-always@(*) begin
-    bit_count_next                  = bit_count_reg;     
+always@(*) begin 
     data_len_next                   = data_len_reg;  
     addr_sent_next                  = addr_sent_reg;
     
@@ -110,323 +149,256 @@ always@(*) begin
                 send_ack            = 1'b0;
                 repeated_start      = 1'b0;
                 addr_sent_next      = 1'b0;
-                ack_o               = 1'b1;
+                ack_o               = 1'b0;
                 sda_t               = 1'b0;
                 byte_sent           = 1'b0;
-                repeated_start_done = 1'b0;
-                stop_done           = 1'b0;
                 data_received       = 1'b0;
                 data_sent           = 1'b0;
+                rst_bit_counter     = 1'b1;
+                i2c_en              = 1'b0;
                 data_len_next       = data_lenght;
             end /* End of idle state */
             
             STATE_START: begin
                 start_bit           = 1'b1;
-                bit_count_next      = 5'd0;
+                i2c_en              = 1'b1;
+                ack_o               = 1'b1;
+                send_addr           = 1'b1;
+                repeated_start      = addr_sent_reg;
                 
                 /* Repeat the control signal values to avoid latches */
-                ack_o               = 1'b1;
                 stop_bit            = 1'b0;
-                stop_done           = 1'b0;
-                data_sent           = 1'b0;
-                data_received       = 1'b0;
-                repeated_start_done = 1'b0;
-                read_ack            = 1'b0;
-                repeated_start      = 1'b0;
-                byte_sent           = 1'b0;
                 send_data           = 1'b0;
-                sda_t               = 1'b0;
-                send_ack            = 1'b0;
+                read_ack            = 1'b0; 
                 read_data           = 1'b0;
-                send_addr           = 1'b0;
+                send_ack            = 1'b0;
+                sda_t               = 1'b0;
+                byte_sent           = 1'b0;
+                data_received       = 1'b0;
+                data_sent           = 1'b0;
+                rst_bit_counter     = 1'b1;
             end /* End of start state */
             
-            STATE_DEVICE_ADDR: begin
-                repeated_start_done = 1'b0;
+            STATE_ADDR: begin
                 start_bit           = 1'b0;
-                bit_count_next      = bit_count_reg + 1;
+                repeated_start      = 1'b0;
                 
-                /* 1 byte sent ? (device addr)*/
-                if(bit_count_reg == PRESCALER * 8) begin
-                    byte_sent       = 1'b1;
-                    read_ack        = 1'b1;
+                if(bit_counter >= 7) begin
                     send_addr       = 1'b0;
                 end
                 else begin
-                    read_ack        = 1'b0;
-                    byte_sent       = 1'b0;
                     send_addr       = 1'b1;
                 end
                 
-                /* Repeat the control signal values to avoid latches */
-                ack_o               = 1'b1;
-                stop_bit            = 1'b0;
-                stop_done           = 1'b0;
-                data_sent           = 1'b0;
-                data_received       = 1'b0;
-                repeated_start      = 1'b0;
-                send_data           = 1'b0;
-                sda_t               = 1'b0;
-                send_ack            = 1'b0;
-                read_data           = 1'b0;
-            end /* End of device address state */
-            
-            STATE_DEVICE_ADDR_ACK: begin
-                sda_t               = 1'b1;
-                read_ack            = 1'b0;
-                byte_sent           = 1'b0;
-                bit_count_next      = 5'd0;
-                
-                /* Repeat the control signal values to avoid latches */
-                start_bit           = 1'b0;
-                ack_o               = 1'b1;
-                stop_bit            = 1'b0;
-                stop_done           = 1'b0;
-                data_sent           = 1'b0;
-                data_received       = 1'b0;
-                repeated_start_done = 1'b0;
-                repeated_start      = 1'b0;
-                send_data           = 1'b0;
-                send_ack            = 1'b0;
-                read_data           = 1'b0;
-                send_addr           = 1'b0;
-            end /* End of device address ack state */
-            
-            STATE_REGISTER_ADDR: begin
-                bit_count_next      = bit_count_reg + 1;
-                
-                /* Turn off sda_t after the 2nd clock in this state */
-                if(bit_count_reg >= 1) begin
+                if(bit_counter > 7) begin
+                    sda_t           = 1'b1;
+                end 
+                else begin
                     sda_t           = 1'b0;
                 end
-                else begin
-                    sda_t           = 1'b1;
-                end
-                
-                /* 1 byte sent ? (register addr) */
-                if(bit_count_reg == PRESCALER * 8) begin
-                    send_addr       = 1'b0;
-                    addr_sent_next  = 1'b1;
+                      
+                if(bit_counter > 7 & scl_posedge) begin
                     byte_sent       = 1'b1;
                     read_ack        = 1'b1;
+                    rst_bit_counter = 1'b1;
                 end
                 else begin
-                    read_ack        = 1'b0;
                     byte_sent       = 1'b0;
-                    send_addr       = 1'b1;
+                    read_ack        = 1'b0;
+                    rst_bit_counter = 1'b0;
                 end
                 
                 /* Repeat the control signal values to avoid latches */
-                start_bit           = 1'b0;
-                ack_o               = 1'b1;
                 stop_bit            = 1'b0;
-                stop_done           = 1'b0;
-                data_sent           = 1'b0;
-                data_received       = 1'b0;
-                repeated_start_done = 1'b0;
-                repeated_start      = 1'b0;
                 send_data           = 1'b0;
-                send_ack            = 1'b0;
                 read_data           = 1'b0;
-            end /* End of register address state */  
+                send_ack            = 1'b0;
+                ack_o               = 1'b1;
+                data_received       = 1'b0;
+                data_sent           = 1'b0;
+                i2c_en              = 1'b1;
+            end /* End of device address state */
             
-            STATE_REGISTER_ADDR_ACK: begin
-                sda_t               = 1'b1;
-                read_ack            = 1'b0;
+            STATE_ADDR_ACK: begin
                 byte_sent           = 1'b0;
-                bit_count_next      = 5'd0;
+                read_ack            = 1'b1 & scl;
+                sda_t               = rw ? 1'b1 : 1'b1 & scl;
+                send_data           = ~addr_sent_reg;
                 
                 /* Repeat the control signal values to avoid latches */
-                start_bit           = 1'b0;
-                ack_o               = 1'b1;
                 stop_bit            = 1'b0;
-                stop_done           = 1'b0;
-                data_sent           = 1'b0;
-                data_received       = 1'b0;
-                repeated_start_done = 1'b0;
-                repeated_start      = 1'b0;
-                send_data           = 1'b0;
-                send_ack            = 1'b0;
-                read_data           = 1'b0;
+                start_bit           = 1'b0;
                 send_addr           = 1'b0;
-            end /* End of register address ack state */ 
+                read_data           = 1'b0;
+                send_ack            = 1'b0;
+                repeated_start      = 1'b0;
+                ack_o               = 1'b1;
+                data_received       = 1'b0;
+                data_sent           = 1'b0;
+                rst_bit_counter     = 1'b1;
+                i2c_en              = 1'b1;
+            end /* End of device address ack state */
             
             STATE_REPEATED_START: begin
-                bit_count_next          = bit_count_reg + 1;
-                
-                if(bit_count_reg == 1) begin
-                    start_bit           = 1'b1;
-                    repeated_start      = 1'b0;
-                    sda_t               = 1'b0;
-                    repeated_start_done = 1'b1;
-                    bit_count_next      = 5'd0;
-                end
-                else begin
-                    start_bit           = 1'b0;
-                    repeated_start_done = 1'b0;
-                    repeated_start      = 1'b1;
-                    sda_t               = 1'b1;
-                end
+                repeated_start      = 1'b1;
                 
                 /* Repeat the control signal values to avoid latches */
-                ack_o                   = 1'b1;
-                stop_bit                = 1'b0;
-                stop_done               = 1'b0;
-                data_sent               = 1'b0;
-                data_received           = 1'b0;
-                read_ack                = 1'b0;
-                byte_sent               = 1'b0;
-                send_data               = 1'b0;
-                send_ack                = 1'b0;
-                read_data               = 1'b0;
-                send_addr               = 1'b0;
+                stop_bit            = 1'b0;
+                start_bit           = 1'b0;
+                send_addr           = 1'b0;
+                send_data           = 1'b0;
+                read_ack            = 1'b0; 
+                read_data           = 1'b0;
+                send_ack            = 1'b0;
+                ack_o               = 1'b1;
+                sda_t               = 1'b0;
+                byte_sent           = 1'b0;
+                data_received       = 1'b0;
+                data_sent           = 1'b0;
+                rst_bit_counter     = 1'b1;
+                i2c_en              = 1'b1;
             end /* End of repeated start state */ 
             
             STATE_READ: begin
-                bit_count_next      = bit_count_reg + 1;
+                read_data           = 1'b1;
+                rst_bit_counter     = 1'b0;
                 
-                /* 1 byte read ?*/
-                if(bit_count_reg == PRESCALER * 8) begin
-                    read_data       = 1'b0;
-                    send_ack        = 1'b1;
-                    ack_o           = 1'b0; /* Always sucess for debug purposes */
+                if(bit_counter == 7 & scl_negedge) begin
                     data_received   = 1'b1;
-                end
+                    ack_o           = 1'b0;
+                    read_data       = 1'b0;
+                    sda_t           = 1'b0;
+                    send_ack        = 1'b1;
+                end 
                 else begin
-                    read_data       = 1'b1;
-                    ack_o           = 1'b1;
                     data_received   = 1'b0;
+                    ack_o           = 1'b1;
+                    sda_t           = 1'b1;
+                    read_data       = 1'b1;
                     send_ack        = 1'b0;
                 end
                 
                 /* Repeat the control signal values to avoid latches */
-                start_bit           = 1'b0;
                 stop_bit            = 1'b0;
-                stop_done           = 1'b0;
-                data_sent           = 1'b0;
-                repeated_start_done = 1'b0;
-                read_ack            = 1'b0;
+                start_bit           = 1'b0;
+                send_addr           = 1'b0;
+                send_data           = 1'b0;
+                read_ack            = 1'b0; 
                 repeated_start      = 1'b0;
                 byte_sent           = 1'b0;
-                send_data           = 1'b0;
-                sda_t               = 1'b1;
-                send_addr           = 1'b0;
+                data_sent           = 1'b0;
+                i2c_en              = 1'b1;
             end /* End of read state */  
             
             STATE_READ_ACK: begin
-                bit_count_next     = 5'd0;
-                send_ack           = 1'b0;
-                sda_t              = 1'b0;
+                send_ack            = 1'b1;
+                ack_o               = 1'b0;
+                data_received       = 1'b0;
                 
                 /* Repeat the control signal values to avoid latches */
-                ack_o               = 1'b0;
-                start_bit           = 1'b0;
                 stop_bit            = 1'b0;
-                stop_done           = 1'b0;
-                data_sent           = 1'b0;
-                data_received       = 1'b0;
-                repeated_start_done = 1'b0;
-                read_ack            = 1'b0;
-                repeated_start      = 1'b0;
-                byte_sent           = 1'b0;
-                send_data           = 1'b0;
-                read_data           = 1'b0;
+                start_bit           = 1'b0;
                 send_addr           = 1'b0;
+                send_data           = 1'b0;
+                read_ack            = 1'b0; 
+                read_data           = 1'b0;
+                send_ack            = 1'b0;
+                repeated_start      = 1'b0;
+                sda_t               = 1'b0;
+                byte_sent           = 1'b0;
+                data_sent           = 1'b0;
+                rst_bit_counter     = 1'b1;
+                i2c_en              = 1'b1;
             end /* End of read ack state */     
             
             STATE_WRITE: begin
-                bit_count_next      = bit_count_reg + 1;
+                addr_sent_next      = 1'b1;
                 
-                /* Turn off sda_t after the 2nd clock in this state */
-                if(bit_count_reg >= 1) begin
-                    sda_t           = 1'b0;
+                if(bit_counter >= 7) begin
+                    send_data       = 1'b0;
                 end
                 else begin
-                    sda_t           = 1'b1;
+                    send_data       = 1'b1;
                 end
                 
-                /* 1 byte sent ? (data) */
-                if(bit_count_reg == PRESCALER * 8) begin
+                if(bit_counter > 7) begin
+                    sda_t           = 1'b1;
+                end 
+                else begin
+                    sda_t           = 1'b0;
+                end
+                
+                if(bit_counter > 7 & scl_posedge) begin
                     byte_sent       = 1'b1;
                     read_ack        = 1'b1;
-                    send_data       = 1'b0;
+                    rst_bit_counter = 1'b1;
                     data_len_next   = data_len_reg - 1;
                 end
                 else begin
-                    read_ack        = 1'b0;
                     byte_sent       = 1'b0;
-                    send_data       = 1'b1;
+                    read_ack        = 1'b0;
+                    rst_bit_counter = 1'b0;
+                end  
+                
+                /* Repeat the control signal values to avoid latches */
+                stop_bit            = 1'b0;
+                start_bit           = 1'b0;
+                send_addr           = 1'b0;
+                read_data           = 1'b0;
+                send_ack            = 1'b0;
+                repeated_start      = 1'b0;
+                ack_o               = 1'b0;
+                data_received       = 1'b0;
+                data_sent           = 1'b0;
+                i2c_en              = 1'b1;
+            end /* End of write state */       
+            
+            STATE_WRITE_ACK: begin
+                byte_sent           = 1'b0;
+                read_ack            = 1'b1 & scl;
+                sda_t               = 1'b1 & scl;
+                rst_bit_counter     = 1'b1;
+                
+                if(data_len_reg == 0) begin
+                    data_sent       = 1'b1;
+                    send_data       = 1'b0;
+                    stop_bit        = 1'b1;
+                end
+                else begin 
+                    data_sent       = 1'b0;
+                    send_data       = ~rw;
+                    stop_bit        = 1'b0;
                 end
                 
                 /* Repeat the control signal values to avoid latches */
                 start_bit           = 1'b0;
-                ack_o               = 1'b1;
-                stop_bit            = 1'b0;
-                stop_done           = 1'b0;
-                data_sent           = 1'b0;
-                data_received       = 1'b0;
-                repeated_start_done = 1'b0;
-                repeated_start      = 1'b0;
-                send_ack            = 1'b0;
-                read_data           = 1'b0;
                 send_addr           = 1'b0;
-            end /* End of write state */       
-            
-            STATE_WRITE_ACK: begin
-                sda_t               = 1'b1;
-                read_ack            = 1'b0;
-                byte_sent           = 1'b0;
-                bit_count_next      = 5'd0;
-                
-                /* All data bytes sent ? */
-                if(data_len_reg == 0) begin
-                    data_sent       = 1'b1;
-                end
-                else begin 
-                    data_sent       = 1'b0;
-                end
-                
-                /* Turn off sda_t after the 2nd clock in this state */
-                start_bit           = 1'b0;
-                ack_o               = 1'b1;
-                stop_bit            = 1'b0;
-                stop_done           = 1'b0;
-                data_received       = 1'b0;
-                repeated_start_done = 1'b0;
-                repeated_start      = 1'b0;
-                send_data           = 1'b0;
-                send_ack            = 1'b0;
                 read_data           = 1'b0;
-                send_addr           = 1'b0;
+                send_ack            = 1'b0;
+                repeated_start      = 1'b0;
+                ack_o               = 1'b0;
+                data_received       = 1'b0;
+                i2c_en              = 1'b1;
             end /* End of write ack state */
             
             STATE_STOP: begin
-                bit_count_next      = bit_count_reg + 1;
+                stop_bit            = 1'b1;
                 ack_o               = 1'b1;
-                
-                if(bit_count_reg == 1) begin
-                    sda_t           = 1'b0;
-                    stop_done       = 1'b1;
-                    stop_bit        = 1'b1;
-                end
-                else begin  
-                    stop_bit        = 1'b0;
-                    stop_done       = 1'b0;
-                    sda_t           = 1'b1;
-                end
-                
-                /* Turn off sda_t after the 2nd clock in this state */
-                start_bit           = 1'b0;
                 data_sent           = 1'b0;
-                data_received       = 1'b0;
-                repeated_start_done = 1'b0;
-                read_ack            = 1'b0;
-                repeated_start      = 1'b0;
-                byte_sent           = 1'b0;
-                send_data           = 1'b0;
-                send_ack            = 1'b0;
-                read_data           = 1'b0;
+                
+                /* Repeat the control signal values to avoid latches */
+                start_bit           = 1'b0;
                 send_addr           = 1'b0;
+                send_data           = 1'b0;
+                read_ack            = 1'b0; 
+                read_data           = 1'b0;
+                send_ack            = 1'b0;
+                repeated_start      = 1'b0;
+                sda_t               = 1'b0;
+                byte_sent           = 1'b0;
+                data_received       = 1'b0;
+                rst_bit_counter     = 1'b1;
+                i2c_en              = 1'b1;
             end /* End of stop state */
             
             default: begin
@@ -442,11 +414,11 @@ always@(*) begin
                 ack_o               = 1'b1;
                 sda_t               = 1'b0;
                 byte_sent           = 1'b0;
-                repeated_start_done = 1'b0;
-                stop_done           = 1'b0;
                 data_sent           = 1'b0;
                 data_received       = 1'b0;
                 data_len_next       = data_lenght;
+                i2c_en              = 1'b0;
+                rst_bit_counter     = 1'b1;
             end
     endcase
 end          

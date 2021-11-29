@@ -6,16 +6,19 @@ module i2c_master #(
 )(
     input  wire clk,
     input  wire rst,
-    input  wire valid_cmd,
+    input  wire start_i2c,
     output wire [3:0] error,
     
     output wire sda,
     output wire scl
 );
 
-reg [15:0] addr                       = 16'hABBB; /* 1st byte - Slave address | 2nd byte - Register address */
-reg [(DATA_WIDTH * 8) - 1:0] data_in  = 64'hCDCCCDCDAAAAAAAA; /* Data to send (max of 8 bytes) */
-reg [7:0] data_out; /* Data received is stored in this reg */
+/* Slave addr */
+reg [7:0] addr                        = 8'hAA; 
+/* Data to send (max of DATA_WIDTH bytes). 1st byte is the reg addr */
+reg [(DATA_WIDTH * 8) - 1:0] data_in  = 64'hEEAAAEA000000000; 
+/* Data received is stored in this reg */
+reg [7:0] data_out; 
 
 wire cu_ack; /* ack from cu to dp (from I2C master to I2C slave) */
 wire dp_ack; /* ack from dp to cu (from I2C slave to I2C master) */
@@ -27,23 +30,13 @@ wire read_ack;
 wire send_ack;
 wire read_data;
 wire repeated_start;
-
+wire scl_posedge; 
+wire scl_negedge;
 wire sda_i;
 wire sda_o;
 wire sda_t;
 
-wire clk_sys;
-wire rst_sys_n;
-
 assign sda = sda_t ? 1'b0 : sda_o;
-
-
-/*clk_wiz_0 clk_wizard(
-    .clk_out1(clk_sys),
-    .resetn(~rst),
-    .locked(rst_sys_n),
-    .clk_in1(clk)
-);*/
 
 /*IOBUF #(
     .DRIVE(12),             // Specify the output drive strength
@@ -61,8 +54,8 @@ i2c_master_dp #(
     .DATA_WIDTH(DATA_WIDTH)
 ) 
 datapath (
-    .clk(clk),//clk_sys),
-    .rst(~rst),//rst_sys_n), 
+    .clk(clk),
+    .rst(~rst), 
     .addr(addr), 
     .data_in(data_in),
     .data_out(data_out),
@@ -77,17 +70,19 @@ datapath (
     .ack_o(dp_ack),
     .ack_i(cu_ack),
     .scl(scl),
+    .p_edge(scl_posedge),
+    .n_edge(scl_negedge),
     .sda_i(1'b0), /* Always ack = 0 for debug purposes */
     .sda_o(sda_o)
 );
 
 i2c_master_cu control_unit(
-    .clk(clk),//clk_sys),
-    .rst(~rst),//rst_sys_n)
-    .valid_cmd(1'b1), /* Always valid for debug purposes */
+    .clk(clk),
+    .rst(~rst),
+    .start_i2c(start_i2c), /* Always valid for debug purposes */
     .ack_i(dp_ack),
-    .rw(addr[8]),
-    .data_lenght(8'd2), /* In case of a write send 2 bytes */
+    .rw(addr[0]),
+    .data_lenght(8'd4), 
     .ack_o(cu_ack),
     .start_bit(start_bit),
     .stop_bit(stop_bit),
@@ -98,7 +93,10 @@ i2c_master_cu control_unit(
     .send_ack(send_ack),
     .read_data(read_data),
     .error(error),
-    .sda_t(sda_t)
+    .sda_t(sda_t),
+    .scl(scl),
+    .p_edge(scl_posedge),
+    .n_edge(scl_negedge)
 );
 
 endmodule

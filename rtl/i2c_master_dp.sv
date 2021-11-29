@@ -7,8 +7,8 @@ module i2c_master_dp#(
     input  wire clk,
     input  wire rst,
     
-    input  reg  [15:0] addr, /* 1st byte - Slave address | 2nd byte - Register address */
-    input  reg  [(DATA_WIDTH * 8) - 1:0] data_in,  /* Data to send (max of 8 bytes) */
+    input  reg  [7:0] addr, 
+    input  reg  [(DATA_WIDTH * 8) - 1:0] data_in,  /* Data to send. 1st byte is the register addr */
     output reg  [7:0] data_out, /* Data received is stored in this reg */
     
     /* Control signals */
@@ -22,90 +22,89 @@ module i2c_master_dp#(
     input  wire  repeated_start,
     input  wire  ack_i,
     
-    output wire  scl,
+    input  wire  scl,
+    input  wire  p_edge,
+    input  wire  n_edge,
+    
     output reg   ack_o,
     
     output reg   sda_o,
     input  reg   sda_i
 );
 
-reg i2c_en                               = 1'b0;
-reg scl_reg                              = 1'b1;
-reg [(DATA_WIDTH * 8) - 1:0] data_in_reg = 0;
-/* addr_reg is 3 bytes because in case of a read: 
-1st byte - Slave addr (with the last bit = wr = 0)
-2nd byte - Register addr
-3rd byte - Slave addr (with the last bit = wr = 1) */
-reg [23:0] addr_reg                      = 0; 
 
-assign scl = scl_reg;
+/* addr_reg is 2 bytes because of the read operation 
+1st byte - Slave addr (with the last bit always = wr = 0)
+2nd byte - Slave addr (with the real wr). This byte is only used in reads and when wr = 1 */
+reg [15:0] addr_reg                      = 0; 
+reg [(DATA_WIDTH * 8) - 1:0] data_in_reg = 0;
+initial sda_o = 1'b1;
+
 
 always@(posedge clk) begin
     if(!rst) begin
-        i2c_en       <= 1'b0;
         sda_o        <= 1'b1;
-        scl_reg      <= 1'b1;
+        ack_o        <= 1'b1;
     end
     else begin
         if(start_bit) begin
-            i2c_en   <= 1'b1;
-            sda_o    <= 1'b0;
-            /* If is indeed a start bit and not a repeated start */
-            if(!i2c_en) begin
-                addr_reg     <= {addr, addr[15:8]};
-                addr_reg[16] <= 1'b0;
-                data_in_reg  <= data_in;
+            sda_o        <= 1'b0;
+            data_in_reg  <= data_in;
+            if(!repeated_start) begin
+                addr_reg <= {addr[7:1], 1'b0, addr};
             end
         end
         
-        if(stop_bit) begin
-            i2c_en  <= 0;
-            sda_o   <= 1;
+        else if(stop_bit) begin
+            if(p_edge) begin
+                sda_o <= 1'b1;
+            end
+            else begin
+                sda_o <= 1'b0;
+            end
         end
         
-        if(i2c_en) begin
-            scl_reg <= ~scl_reg;
-            
-            /* Negedge scl */
-            if(scl_reg) begin
-                
-                if(send_addr) begin
-                    sda_o       <= addr_reg[23];
-                    addr_reg    <= {addr_reg[22:0], 1'b0};
-                end
-                
-                if(send_data) begin
-                    sda_o       <= data_in_reg[(DATA_WIDTH * 8) - 1];
-                    data_in_reg <= {data_in_reg[(DATA_WIDTH * 8) - 2:0], 1'b0};
-                end
-                
-                if(send_ack) begin
-                    sda_o <= ack_i;
-                end
-                
-                if(repeated_start) begin
-                    sda_o <= 1'b1;
-                end
-                
-                if(read_ack) begin
-                    ack_o <= sda_i;
-                end
+        else if(repeated_start) begin
+            if(p_edge) begin
+                sda_o <= 1'b0;
+            end 
+            else begin
+                sda_o <= 1'b1;
             end
-            
-            /* Posedge scl */
-            else begin 
-                if(read_data) begin
-                    data_out    <= {data_out[6:0], 1'b0};
-                    data_out[0] <= sda_i;
-                end
-            end
+        end
+    
+        if(read_ack) begin
+            ack_o <= sda_i;
         end
         else begin
-            scl_reg <= 1'b1;
-            ack_o   <= 1'b1;
+            ack_o <= 1'b1;
         end
         
+        /* Scl negedge */
+        if(n_edge) begin
+            if(send_addr) begin
+                sda_o       <= addr_reg[15];
+                addr_reg    <= {addr_reg[14:0], 1'b0};
+            end
+            
+            else if(send_data) begin
+                sda_o       <= data_in_reg[(DATA_WIDTH * 8) - 1];
+                data_in_reg <= {data_in_reg[(DATA_WIDTH * 8) - 2:0], 1'b0};
+            end
+            
+            else if(send_ack) begin
+                sda_o <= ack_i;
+            end
+        end
+        
+        /* Scl posedge */
+        if(p_edge) begin
+            if(read_data) begin
+                data_out    <= {data_out[6:0], sda_i};
+                sda_o       <= 1'b0;
+            end
+        end
     end
-end
+end 
 
 endmodule
