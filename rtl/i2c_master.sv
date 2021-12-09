@@ -2,23 +2,24 @@
 
 
 module i2c_master #(
-    parameter DATA_WIDTH = 8 /* Max number of bytes that can be sent in each write operation */
+    parameter DATA_WIDTH = 9 /* Max number of bytes that can be sent in each write operation */
 )(
     input  wire clk,
     input  wire rst,
     input  wire start_i2c,
-    output wire [3:0] error,
+    input  wire [7:0] addr, /* Slave addr */ 
+    input  wire [(DATA_WIDTH * 8)-1:0] data_to_send, /* 1st byte is the reg addr */
+    input  wire [7:0] data_size,
+    input  wire [15:0] prescaler, /* Tscl = (Tclk * 2 * PRESCALER) + (2 * Tclk) */
     
-    output wire sda,
+    output wire [7:0] data_received,
+    output wire valid_trans, /* 1 when tranmission is sucessful */
+    output wire valid_recep, /* 1 when reception   is sucessful */
+    output wire error,
+    inout  wire sda,
     output wire scl
 );
 
-/* Slave addr */
-reg [7:0] addr                        = 8'hAA; 
-/* Data to send (max of DATA_WIDTH bytes). 1st byte is the reg addr */
-reg [(DATA_WIDTH * 8) - 1:0] data_in  = 64'hEEAAAEA000000000; 
-/* Data received is stored in this reg */
-reg [7:0] data_out; 
 
 wire cu_ack; /* ack from cu to dp (from I2C master to I2C slave) */
 wire dp_ack; /* ack from dp to cu (from I2C slave to I2C master) */
@@ -29,16 +30,31 @@ wire send_data;
 wire read_ack;
 wire send_ack;
 wire read_data;
-wire repeated_start;
+wire [2:0] repeated_start;
 wire scl_posedge; 
 wire scl_negedge;
 wire sda_i;
 wire sda_o;
 wire sda_t;
 
-assign sda = sda_t ? 1'b0 : sda_o;
+reg [1:0] start_reg = 2'd0;
+wire start;
 
-/*IOBUF #(
+
+assign start = start_reg[0] & ~start_reg[1];
+
+/* Assure that only 1 transmission/reception is made for each start */
+always@(posedge clk) begin 
+    if(!rst) begin
+        start_reg <= 2'd0;
+    end
+    else begin
+        start_reg[0] <= start_i2c;
+        start_reg[1] <= start_reg[0];
+    end
+end
+
+IOBUF #(
     .DRIVE(12),             // Specify the output drive strength
     .IBUF_LOW_PWR("TRUE"),  // Low Power - "TRUE", High Performance = "FALSE" 
     .IOSTANDARD("DEFAULT"), // Specify the I/O standard
@@ -48,17 +64,17 @@ assign sda = sda_t ? 1'b0 : sda_o;
     .IO(sda),               // Buffer inout port (connect directly to top-level port)
     .I(sda_o),              // Buffer input
     .T(sda_t)               // 3-state enable input, high=input, low=output
-    ); */
+    ); 
 
 i2c_master_dp #(
     .DATA_WIDTH(DATA_WIDTH)
 ) 
 datapath (
     .clk(clk),
-    .rst(~rst), 
+    .rst(rst), 
     .addr(addr), 
-    .data_in(data_in),
-    .data_out(data_out),
+    .data_to_send(data_to_send),
+    .data_received(data_received),
     .start_bit(start_bit),
     .stop_bit(stop_bit),
     .send_addr(send_addr),
@@ -72,17 +88,18 @@ datapath (
     .scl(scl),
     .p_edge(scl_posedge),
     .n_edge(scl_negedge),
-    .sda_i(1'b0), /* Always ack = 0 for debug purposes */
+    .sda_i(sda_i), 
     .sda_o(sda_o)
 );
 
 i2c_master_cu control_unit(
     .clk(clk),
-    .rst(~rst),
-    .start_i2c(start_i2c), /* Always valid for debug purposes */
+    .rst(rst),
+    .start_i2c(start),
     .ack_i(dp_ack),
     .rw(addr[0]),
-    .data_lenght(8'd4), 
+    .data_lenght(data_size), 
+    .prescaler(prescaler), 
     .ack_o(cu_ack),
     .start_bit(start_bit),
     .stop_bit(stop_bit),
@@ -96,7 +113,9 @@ i2c_master_cu control_unit(
     .sda_t(sda_t),
     .scl(scl),
     .p_edge(scl_posedge),
-    .n_edge(scl_negedge)
+    .n_edge(scl_negedge),
+    .valid_trans(valid_trans),
+    .valid_recep(valid_recep)
 );
 
 endmodule
