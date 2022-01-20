@@ -14,6 +14,7 @@ module i2c_master_axi_slave_v1_0 #(
     // Users to add ports here
     inout   wire sda,
     output  wire scl,
+    output  wire i2c_irq,
     // User ports ends
     // Do not modify the ports beyond this line
 
@@ -68,7 +69,8 @@ i2c_master_axi_slave_v1_0_S00_AXI #(
     .S_AXI_RVALID(s00_axi_rvalid),
     .S_AXI_RREADY(s00_axi_rready),
     .sda(sda),
-    .scl(scl)
+    .scl(scl),
+    .i2c_irq(i2c_irq)
 );
 endmodule
 

@@ -8,8 +8,8 @@ This unit provides a simple I2C master with an AXI interface. It has four 32bits
 | ------ | ----------- | ------ |
 | [31:16] | RW | **Prescaler**: Prescales the SCL clock line. |
 | [15:14] | - | **Unused** |
-| 13 | R | **Bus busy**: This bit indicates the bus is involved in a transaction. This will be set at start condition and cleared at stop. (to be done) |
-| 12 | RW | **EN**: This bit indicates that the core is enabled. (to be done) |
+| 13 | R | **INT**: This bit enables the I2C interrupt. If set, an interrupt will occur for each valid reception or transmission. |
+| 12 | RW | **EN**: This bit indicates that the core is enabled. |
 | 11 | R | **Valid reception**: This bit indicates that the data was successfully received and can be read from the core. This bit is cleared every time a start condition is emitted. |
 | 10 | R | **Valid transmission**: This bit indicates that the data was successfully sent. This bit is cleared every time a start condition is emitted.|
 | 9  | R | **Error**: This bit indicates an error in the communication. |

@@ -15,6 +15,7 @@ module i2c_master_axi_slave_v1_0_S00_AXI #(
     // Users to add ports here
     inout   wire sda,
     output  wire scl,
+    output  wire i2c_irq,
     // User ports ends
     
     // Do not modify the ports beyond this line
@@ -77,7 +78,9 @@ assign i2c_conf_wire0[8:0]   = i2c_conf_reg0[8:0];
 assign i2c_conf_wire0[9]     = error;
 assign i2c_conf_wire0[10]    = valid_trans;
 assign i2c_conf_wire0[11]    = valid_recep;
-assign i2c_conf_wire0[15:12] = i2c_conf_reg0[15:12];
+assign i2c_conf_wire0[12]    = i2c_conf_reg0[12];
+assign i2c_conf_wire0[13]    = i2c_conf_reg0[13];
+assign i2c_conf_wire0[15:14] = 2'b00;
 assign i2c_conf_wire0[31:16] = i2c_conf_reg0[31:16];
 
 wire [31:0] i2c_conf_wire3; 
@@ -182,13 +185,19 @@ always @(posedge S_AXI_ACLK) begin
         i2c_conf_reg2 <= 32'd0;
         i2c_conf_reg3 <= 32'd0;
     end 
-    else if (axil_write_ready) begin
-        case(awskd_addr)
-            2'b00:	i2c_conf_reg0 <= wskd_i2c_conf_reg0;
-            2'b01:	i2c_conf_reg1 <= wskd_i2c_conf_reg1;
-            2'b10:	i2c_conf_reg2 <= wskd_i2c_conf_reg2;
-            2'b11:	i2c_conf_reg3 <= wskd_i2c_conf_reg3;
-        endcase
+    else begin 
+        if (axil_write_ready) begin
+            case(awskd_addr)
+                2'b00:	i2c_conf_reg0 <= wskd_i2c_conf_reg0;
+                2'b01:	i2c_conf_reg1 <= wskd_i2c_conf_reg1;
+                2'b10:	i2c_conf_reg2 <= wskd_i2c_conf_reg2;
+                2'b11:	i2c_conf_reg3 <= wskd_i2c_conf_reg3;
+            endcase
+        end
+        else begin
+            /* Clear start bit */
+            i2c_conf_reg0[8] <= 1'b0;
+        end
     end
 end
 
@@ -232,7 +241,9 @@ endfunction
 i2c_master i2c_unit(
     .clk(S_AXI_ACLK), 
     .rst(S_AXI_ARESETN), 
-    .start_i2c(i2c_conf_reg0[8]), 
+    .start_i2c(i2c_conf_reg0[8]),
+    .i2c_en(i2c_conf_reg0[12]),
+    .int_en(i2c_conf_reg0[13]),
     .addr(i2c_conf_reg0[7:0]),
     .prescaler(i2c_conf_reg0[31:16]),
     .data_to_send({i2c_conf_reg1, i2c_conf_reg2, i2c_conf_reg3[31:24]}),
@@ -242,7 +253,8 @@ i2c_master i2c_unit(
     .sda(sda), 
     .scl(scl),
     .valid_trans(valid_trans),
-    .valid_recep(valid_recep)
+    .valid_recep(valid_recep),
+    .i2c_irq(i2c_irq)
 );
 
 endmodule

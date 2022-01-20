@@ -7,6 +7,8 @@ module i2c_master #(
     input  wire clk,
     input  wire rst,
     input  wire start_i2c,
+    input  wire i2c_en,
+    input  wire int_en,
     input  wire [7:0] addr, /* Slave addr */ 
     input  wire [(DATA_WIDTH * 8)-1:0] data_to_send, /* 1st byte is the reg addr */
     input  wire [7:0] data_size,
@@ -17,7 +19,8 @@ module i2c_master #(
     output wire valid_recep, /* 1 when reception   is sucessful */
     output wire error,
     inout  wire sda,
-    output wire scl
+    output wire scl,
+    output wire i2c_irq
 );
 
 
@@ -30,29 +33,13 @@ wire send_data;
 wire read_ack;
 wire send_ack;
 wire read_data;
-wire [2:0] repeated_start;
+wire [1:0] repeated_start;
 wire scl_posedge; 
 wire scl_negedge;
 wire sda_i;
 wire sda_o;
 wire sda_t;
 
-reg [1:0] start_reg = 2'd0;
-wire start;
-
-
-assign start = start_reg[0] & ~start_reg[1];
-
-/* Assure that only 1 transmission/reception is made for each start */
-always@(posedge clk) begin 
-    if(!rst) begin
-        start_reg <= 2'd0;
-    end
-    else begin
-        start_reg[0] <= start_i2c;
-        start_reg[1] <= start_reg[0];
-    end
-end
 
 IOBUF #(
     .DRIVE(12),             // Specify the output drive strength
@@ -95,9 +82,11 @@ datapath (
 i2c_master_cu control_unit(
     .clk(clk),
     .rst(rst),
-    .start_i2c(start),
+    .start_i2c(start_i2c),
     .ack_i(dp_ack),
     .rw(addr[0]),
+    .i2c_en(i2c_en),
+    .int_en(int_en),
     .data_lenght(data_size), 
     .prescaler(prescaler), 
     .ack_o(cu_ack),
@@ -115,7 +104,8 @@ i2c_master_cu control_unit(
     .p_edge(scl_posedge),
     .n_edge(scl_negedge),
     .valid_trans(valid_trans),
-    .valid_recep(valid_recep)
+    .valid_recep(valid_recep),
+    .i2c_irq(i2c_irq)
 );
 
 endmodule

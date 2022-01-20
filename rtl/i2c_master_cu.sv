@@ -7,6 +7,8 @@ module i2c_master_cu(
     input  wire start_i2c,
     input  wire ack_i,
     input  wire rw, /* 0 -> Write; 1 -> Read */
+    input  wire i2c_en,
+    input  wire int_en, /* Flag to indicate if interrupt is enabled */
     input  wire [7:0]  data_lenght, /* Number of bytes to send */
     input  wire [15:0] prescaler,
  
@@ -24,6 +26,7 @@ module i2c_master_cu(
     output reg  valid_recep, /* 1 when reception   is sucessful */
     output wire error,
     output wire scl,
+    output wire i2c_irq,
     output wire p_edge,
     output wire n_edge
 );
@@ -46,7 +49,7 @@ wire [3:0] next_state;
 reg data_received       = 1'b0;
 reg data_sent           = 1'b0;
 reg byte_sent           = 1'b0;
-reg i2c_en              = 1'b0;
+reg busy                = 1'b0;
 reg [63:0] scl_counter  = 64'd0;
 reg [3:0] bit_counter   = 4'd0;
 reg rst_bit_counter     = 1'b1;
@@ -65,6 +68,8 @@ assign error            = (state == STATE_ERROR) ? 1'b1 : 1'b0;
 assign scl              = scl_reg;
 assign p_edge           = scl_posedge;
 assign n_edge           = scl_negedge;
+/* If there is a valid transmission or a valid reception an interrutp should occur */
+assign i2c_irq          = (int_en == 1'b1) ? (valid_trans | valid_recep) : 1'b0;
 
 assign next_state = (state == STATE_IDLE & start_i2c)                                    ? STATE_START :
                     (state == STATE_IDLE & ~start_i2c)                                   ? STATE_IDLE : 
@@ -95,7 +100,7 @@ assign next_state = (state == STATE_IDLE & start_i2c)                           
      
 /* Scl generator */
 always@(posedge clk) begin
-    if(!rst) begin
+    if(!rst || !i2c_en) begin
         scl_reg     <= 1'b1;
         scl_counter <= 64'd0;
         scl_negedge <= 1'b0;
@@ -103,19 +108,19 @@ always@(posedge clk) begin
         rs_counter  <= 1'b0;
     end
     else begin
-        if(scl_counter < prescaler & i2c_en) begin
+        if(scl_counter < prescaler & busy) begin
             scl_counter      <= scl_counter + 1'b1;
             scl_negedge      <= 1'b0;
             scl_posedge      <= 1'b0;
         end
-        else if(scl_counter == prescaler & i2c_en) begin
+        else if(scl_counter == prescaler & busy) begin
             scl_reg          <= ~scl_reg;
             scl_counter      <= 64'd0;
             scl_posedge      <= ~scl_reg;
             scl_negedge      <= scl_reg;
         end
         
-        if(scl_counter >= (prescaler / 4) & i2c_en & state == STATE_REPEATED_START & scl_reg == 1'b1) begin
+        if(scl_counter >= (prescaler / 4) & busy & state == STATE_REPEATED_START & scl_reg == 1'b1) begin
             rs_counter <= 1'b1;
         end
         else begin
@@ -125,7 +130,7 @@ always@(posedge clk) begin
 end
 
 always@(posedge clk) begin
-    if(!rst) begin
+    if(!rst || !i2c_en) begin
         state         <= STATE_IDLE;
     end
     else begin
@@ -138,7 +143,7 @@ always@(posedge clk) begin
 end
 
 always@(posedge clk) begin
-    if(~rst || rst_bit_counter) begin
+    if(~rst || rst_bit_counter || !i2c_en) begin
         bit_counter <= 4'd0;
     end
     else if(scl_negedge) begin
@@ -169,13 +174,13 @@ always@(*) begin
                 data_received       = 1'b0;
                 data_sent           = 1'b0;
                 rst_bit_counter     = 1'b1;
-                i2c_en              = 1'b0;
+                busy                = 1'b0;
                 data_len_next       = data_lenght;
             end /* End of idle state */
             
             STATE_START: begin
                 start_bit           = 1'b1;
-                i2c_en              = 1'b1;
+                busy                = 1'b1;
                 ack_o               = 1'b1;
                 send_addr           = 1'b1;
                 valid_trans_next    = 1'b0;
@@ -231,7 +236,7 @@ always@(*) begin
                 ack_o               = 1'b1;
                 data_received       = 1'b0;
                 data_sent           = 1'b0;
-                i2c_en              = 1'b1;
+                busy                = 1'b1;
                 repeated_start      = 2'd0;
             end /* End of device address state */
             
@@ -252,7 +257,7 @@ always@(*) begin
                 data_received       = 1'b0;
                 data_sent           = 1'b0;
                 rst_bit_counter     = 1'b1;
-                i2c_en              = 1'b1;
+                busy                = 1'b1;
             end /* End of device address ack state */
             
             STATE_REPEATED_START: begin
@@ -279,7 +284,7 @@ always@(*) begin
                 data_received       = 1'b0;
                 data_sent           = 1'b0;
                 rst_bit_counter     = 1'b1;
-                i2c_en              = 1'b1;
+                busy                = 1'b1;
             end /* End of repeated start state */ 
             
             STATE_READ: begin
@@ -310,7 +315,7 @@ always@(*) begin
                 repeated_start      = 2'd0;
                 byte_sent           = 1'b0;
                 data_sent           = 1'b0;
-                i2c_en              = 1'b1;
+                busy                = 1'b1;
             end /* End of read state */  
             
             STATE_READ_ACK: begin
@@ -331,7 +336,7 @@ always@(*) begin
                 byte_sent           = 1'b0;
                 data_sent           = 1'b0;
                 rst_bit_counter     = 1'b1;
-                i2c_en              = 1'b1;
+                busy                = 1'b1;
             end /* End of read ack state */     
             
             STATE_WRITE: begin
@@ -373,7 +378,7 @@ always@(*) begin
                 ack_o               = 1'b0;
                 data_received       = 1'b0;
                 data_sent           = 1'b0;
-                i2c_en              = 1'b1;
+                busy                = 1'b1;
             end /* End of write state */       
             
             STATE_WRITE_ACK: begin
@@ -401,7 +406,7 @@ always@(*) begin
                 repeated_start      = 2'd0;
                 ack_o               = 1'b0;
                 data_received       = 1'b0;
-                i2c_en              = 1'b1;
+                busy                = 1'b1;
             end /* End of write ack state */
             
             STATE_STOP: begin
@@ -428,7 +433,7 @@ always@(*) begin
                 byte_sent           = 1'b0;
                 data_received       = 1'b0;
                 rst_bit_counter     = 1'b1;
-                i2c_en              = 1'b1;
+                busy                = 1'b1;
             end /* End of stop state */
             
             default: begin
@@ -447,7 +452,7 @@ always@(*) begin
                 data_sent           = 1'b0;
                 data_received       = 1'b0;
                 data_len_next       = data_lenght;
-                i2c_en              = 1'b0;
+                busy                = 1'b0;
                 rst_bit_counter     = 1'b1;
                 valid_trans_next    = 1'b0;
                 valid_recep_next    = 1'b0;
